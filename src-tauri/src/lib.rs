@@ -9,6 +9,7 @@
 mod api;
 pub mod commands;
 pub mod helpers;
+mod tray_tooltip;
 pub mod types;
 
 use tauri::{
@@ -49,7 +50,7 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
 
-            TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("bundle icon missing").clone())
                 .tooltip("stock-analysis")
                 .menu(&menu)
@@ -70,6 +71,9 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // 托盘 tooltip 动态更新（持仓摘要）：state 持有托盘句柄，供前端推送命令使用
+            tray_tooltip::init(app.handle(), tray);
             Ok(())
         })
         // 关闭主窗口 → 隐藏到托盘（不退出）；迷你窗口关闭仍为正常关闭
@@ -104,6 +108,7 @@ pub fn run() {
             commands::get_iwencai_robot,
             commands::get_app_version,
             commands::check_for_update,
+            tray_tooltip::update_tray_tooltip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

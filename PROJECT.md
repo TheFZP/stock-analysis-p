@@ -13,7 +13,7 @@ stock-analysis/
 ├── src/                        Vue 前端
 │   ├── App.vue                 入口：窗口/定时器/跨窗口联动
 │   ├── components/             布局/列表/详情/弹窗/迷你窗 + settings/(5) + ai/(4)
-│   ├── composables/            29 个（§3.1）
+│   ├── composables/            30 个（§3.1）
 │   ├── skills/                 13 skill / 17 工具（§3.2）
 │   ├── prompts/                system-prompt.md（AI 提示词模板，§3.4）
 │   └── utils/                  format / limit（涨跌停按板块）/ marketTime（交易日历+时段）/ notify / klineCache
@@ -22,6 +22,7 @@ stock-analysis/
 │   ├── capabilities/           default.json 窗口权限：main/mini/iwencai
 │   └── src/
 │       ├── commands.rs         21 个命令（§4.1）
+│       ├── tray_tooltip.rs     托盘 tooltip 持仓摘要（+1 命令，§4.1）
 │       ├── types.rs / helpers.rs（代码转换 §4.3）
 │       └── api/                tencent / eastmoney / hotlist / calendar / llm / web / iwencai
 └── public/
@@ -35,7 +36,7 @@ App.vue → composables/useXxx.js → invoke → commands.rs → api/（tencent 
 
 ## 3. 前端模块
 
-### 3.1 Composables（29 个）
+### 3.1 Composables（30 个）
 
 **数据加载**（`useKlineData`/`useIntradayData`/`useStockSearch`/`useIndustryData` 用请求序号防竞态；`useMoneyFlow` 用选中态比对）：
 
@@ -54,7 +55,7 @@ App.vue → composables/useXxx.js → invoke → commands.rs → api/（tencent 
 
 **状态与持久化**：`useWatchlist`（自选 CRUD）、`useSettings`（全局设置单例）、`useTradingCalendar`（A 股交易日历，lazy 注入 `marketTime.js`）、`useWatchlistNotifications` / `useMaAlerts` / `usePriceAlerts`（三套通知，跨日重置快照防隔夜跳空）、`aiMessageStore`（AI 消息隔离持久化）、`llmClient`（SSE 流式，streamId 过滤 + 120s 超时）
 
-**窗口与系统**：`useChildWindows`（子窗口管理）、`useGlobalShortcuts`（Ctrl+K 搜索 / Ctrl+N 全局 AI）
+**窗口与系统**：`useChildWindows`（子窗口管理）、`useGlobalShortcuts`（Ctrl+K 搜索 / Ctrl+N 全局 AI）、`useTrayTooltip`（托盘 hover 显示持仓摘要，仅主窗口参与）
 
 ### 3.2 Skills（12 skill / 16 工具）
 
@@ -71,7 +72,7 @@ App.vue → composables/useXxx.js → invoke → commands.rs → api/（tencent 
 | `StockPicks` | `render_stock_picks`（选股结果卡片，`PICKS_MARKER` 前缀 → `msg.picks` 渲染） |
 | `UserContext` | `read/save_user_profile` / `get_fx_rate` |
 
-> 未开放为 AI 工具的命令：`call_llm` / `call_llm_stream`（AI 自身管道）、`get_trading_calendar`（前端时段判断内部使用）、`get_app_version` / `check_for_update`（应用级）。
+> 未开放为 AI 工具的命令：`call_llm` / `call_llm_stream`（AI 自身管道）、`get_trading_calendar`（前端时段判断内部使用）、`get_app_version` / `check_for_update`（应用级）、`update_tray_tooltip`（托盘 UI）。
 
 ### 3.3 核心子系统（一行一系统）
 
@@ -85,7 +86,7 @@ App.vue → composables/useXxx.js → invoke → commands.rs → api/（tencent 
 - **AI 选股**: 问财窗口「AI 分析这批股票」→ `iwencai-ai-analyze` → 全局 AI `injectContextMessage` 注入结果表（`_injected` 不持久化）；`render_stock_picks` 渲染选股卡片（加自选/查看详情）；短线买入清单带**贴线硬性条件**（现价须在 MA5 之上且偏离 ≤3% 优先、>5% 剔除，用 `get_stock_kline` 的 `ma.MA5`/`vsMA5Pct` 核验）
 - **联网搜索**: 开关全局生效；完整流程只维护在 `WebSearch.js`
 - **交易日历**: `useTradingCalendar` 拉取 `get_trading_calendar` → 注入 `marketTime.js` 模块级 Set；**仅 A 股**——港股仍按周一~周五，且仅当自选/持仓含 5 位港股代码时才纳入 `isMarketSession`（否则 A 股休市日完全零轮询）；接口窗口固定 `[今日-1年, 今日]`，只对拉取当日及之前有效 → 日缓存 + 跨日自动刷新；无 Key / 请求失败静默降级回周末判断
-- **快捷键/单例/托盘/时段感知**: Ctrl+K / Ctrl+N；single-instance；关窗隐藏托盘；四定时器经 `sessionTick` 守卫，盘外零请求
+- **快捷键/单例/托盘/时段感知**: Ctrl+K / Ctrl+N；single-instance；关窗隐藏托盘；四定时器经 `sessionTick` 守卫，盘外零请求；托盘 hover 显示持仓摘要（缓存快照，≤60 UTF-16 unit，仅主窗口写入）
 - **子窗口**: 迷你 `?mini=1`（10s 刷新）、问财 `?iwencai=1`（本地分页；AI 优化查询）
 
 ### 3.4 AI 提示词体系（改提示词必读）
@@ -98,7 +99,7 @@ App.vue → composables/useXxx.js → invoke → commands.rs → api/（tencent 
 
 ## 4. Rust 后端
 
-### 4.1 Tauri 命令（21 个）
+### 4.1 Tauri 命令（22 个）
 
 | 命令 | 数据源 | 说明 |
 |------|--------|------|
@@ -111,6 +112,7 @@ App.vue → composables/useXxx.js → invoke → commands.rs → api/（tencent 
 | `read/save_user_profile` / `web_search` / `web_fetch` / `get_fx_rate` | 本地 / 东财 / URL / Frankfurter | 画像 / 新闻搜索 / 正文抓取（SSRF 防护 §4.2）/ 汇率 |
 | `get_iwencai_robot` | 问财 | 选股（Cookie v + 浏览器头；page 忽略，perpage ≤100） |
 | `get_app_version` / `check_for_update` | 本地 / GitHub | 版本 / 更新（直连失败回退系统代理） |
+| `update_tray_tooltip` | 前端推送 | 托盘 tooltip 持仓摘要（szTip ≤60 UTF-16 unit；**仅 main 窗口可写**；文本未变 no-op；§7.12） |
 
 ### 4.2 数据源特征（quirk 唯一真源）
 
@@ -162,3 +164,4 @@ cargo check        # 需 Rust ≥ 1.85（time-core 0.1.8 要求 edition2024）
 9. **文件变动 → 同步本文档**（新增/删除文件、命令、composable/skill 等）
 10. **AI 提示词维护**: 三处位置——`system-prompt.md`（模板）/ `aiContext.js`（填充+公共常量）/ `skills/*.js`（各段），改后同步 §3.4；保留「数据必须真实」约束
 11. **AI 必读文档**: `AGENTS.md`（自动注入短指令，保持精简 ≤64KB）+ 本文档（完整真源），细节一律下沉到本文档
+12. **托盘 tooltip**: 文本预算 ≤60 UTF-16 unit（szTip 硬限 127，tray-icon 在内容 ≥127 unit 时会挤掉结尾 NUL；Win11 24H2 实测约 64 即截断），两侧常量须同步（`useTrayTooltip.js` 的 `MAX_UNITS` / `tray_tooltip.rs` 的 `TOOLTIP_MAX_UNITS`）；**仅 main 窗口可写**（mini/iwencai 持仓是永不刷新的 localStorage 快照，盈亏恒为 0）

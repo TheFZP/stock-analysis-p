@@ -34,6 +34,7 @@ import { useChildWindows } from "./composables/useChildWindows";
 import { useGlobalShortcuts } from "./composables/useGlobalShortcuts";
 import { useSettings } from "./composables/useSettings";
 import { useTradingCalendar } from "./composables/useTradingCalendar";
+import { useTrayTooltip } from "./composables/useTrayTooltip";
 import { isTradingHours } from "./utils/marketTime.js";
 
 // ---- 侧边栏视图切换 ----
@@ -66,6 +67,9 @@ const {
 } = useWatchlist();
 
 const { loadQuote, loadQuotesBatch } = useQuoteLoader();
+
+// ---- 托盘 tooltip 持仓摘要（仅主窗口参与，子窗口持仓是永不刷新的快照）----
+useTrayTooltip({ enabled: !isMiniMode && !isIwencaiMode });
 
 const {
   industryData, industryLoading, industryError, showIndustryModal,

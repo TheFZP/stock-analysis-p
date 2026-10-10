@@ -29,6 +29,6 @@
 |------|------|
 | 前端入口 | `src/App.vue`（窗口/定时器/联动）+ `src/components/` |
 | 数据加载 | `src/composables/useXxx.js` → Rust 命令 |
-| Rust 命令 | `src-tauri/src/commands.rs`（21 个命令）→ `src-tauri/src/api/*.rs` |
+| Rust 命令 | `src-tauri/src/commands.rs`（21 个命令）+ `tray_tooltip.rs`（托盘 tooltip）→ `src-tauri/src/api/*.rs` |
 | 窗口权限 | `src-tauri/capabilities/default.json`（main/mini/iwencai 三个窗口） |
 | AI 提示词 | `src/prompts/system-prompt.md` + `src/composables/aiContext.js` + `src/skills/` |
