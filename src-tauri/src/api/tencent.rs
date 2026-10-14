@@ -62,12 +62,12 @@ pub async fn fetch_stock_quote(code: &str) -> Result<StockQuote, String> {
         return Err(format!("腾讯API返回格式异常: {} 个字段", fields.len()));
     }
 
-    // A 股直接解析（振幅在 [46]）
+    // A 股直接解析（振幅在 [43]）
     if !is_hk_stock(code) {
         return Ok(parse_a_quote_fields(code, &fields));
     }
 
-    // 港股字段差异：振幅在 [43]、换手率在 [59]、单位归一化
+    // 港股字段差异：换手率在 [59]（A 股在 [38]）、量额单位需归一化（振幅同为 [43]）
     let name = fields.get(1).cloned().unwrap_or_default();
     let price = fields.get(3).unwrap_or(&"0".to_string()).parse::<f64>().unwrap_or(0.0);
     let prev_close = fields.get(4).unwrap_or(&"0".to_string()).parse::<f64>().unwrap_or(0.0);
@@ -99,7 +99,7 @@ pub async fn fetch_stock_quote(code: &str) -> Result<StockQuote, String> {
 
 /// 解析 A 股行情字段（腾讯 qt.gtimg.cn 布局，~ 分隔）
 /// 字段: [1]名称 [3]价格 [4]昨收 [5]今开 [6]成交量(手) [31]涨跌额 [32]涨跌幅
-///       [33]最高 [34]最低 [37]成交额(万元) [38]换手率 [39]市盈率 [46]振幅
+///       [33]最高 [34]最低 [37]成交额(万元) [38]换手率 [39]市盈率 [43]振幅 [46]市净率
 fn parse_a_quote_fields(code: &str, fields: &[String]) -> StockQuote {
     let get = |i: usize| fields.get(i).unwrap_or(&"0".to_string()).parse::<f64>().unwrap_or(0.0);
     StockQuote {
@@ -116,7 +116,7 @@ fn parse_a_quote_fields(code: &str, fields: &[String]) -> StockQuote {
         low: get(34),
         turnover_rate: get(38),
         pe: get(39),
-        amplitude: get(46),
+        amplitude: get(43),
     }
 }
 
@@ -227,7 +227,10 @@ pub async fn fetch_money_flow(code: &str) -> Result<MoneyFlow, String> {
     let text = text.to_string();
 
     let fields: Vec<&str> = text.split('~').collect();
-    if fields.len() < 12 {
+    // 有效响应需覆盖到索引 40（小单占比）；字段不足说明接口改版/失效
+    // （如现在返回的 v_pv_none_match="1"），返回 NO_DATA 交由上层换数据源，
+    // 避免把缺失字段静默当成 0 展示
+    if fields.len() < 41 {
         return Err("NO_DATA".to_string());
     }
 
@@ -463,6 +466,11 @@ pub async fn fetch_intraday_data(code: &str) -> Result<IntradayData, String> {
     let mut prev_vol = 0.0; // 上一分钟的累计量，用于差分
     let mut prev_turnover = 0.0; // 上一分钟的累计额，用于差分
 
+    // 累计成交量单位：A 股/北交所为「手」（1 手 = 100 股），港股为「股」
+    // （实测 hk00700/hk01810/hk09988：累计成交额 / 累计量 ≈ 现价，即港股已是股数）
+    let is_hk = is_hk_stock(code);
+    let shares_per_unit: f64 = if is_hk { 1.0 } else { 100.0 };
+
     // 交易时段判断（按市场）：接口会在收盘后附带零星的盘后成交分钟
     // （如 15:06-15:30 量 0-20 的僵尸数据），必须剔除——
     // 否则"尾盘 15 分钟"检测窗口会被盘后数据占据，尾盘信号/指标全部失效
@@ -493,9 +501,9 @@ pub async fn fetch_intraday_data(code: &str) -> Result<IntradayData, String> {
         }
         let parts: Vec<&str> = s.split(' ').collect();
         if parts.len() >= 3 {
-            // time: "0930" → "09:30"
+            // time: "0930" → "09:30"（is_ascii 保证字节切片不会切在字符中间）
             let raw_time = parts[0];
-            let time = if raw_time.len() == 4 {
+            let time = if raw_time.len() == 4 && raw_time.is_ascii() {
                 format!("{}:{}", &raw_time[..2], &raw_time[2..])
             } else {
                 raw_time.to_string()
@@ -510,15 +518,19 @@ pub async fn fetch_intraday_data(code: &str) -> Result<IntradayData, String> {
                 continue;
             }
             let price: f64 = parts[1].parse().unwrap_or(0.0);
-            let cum_volume: f64 = parts[2].parse().unwrap_or(0.0); // API 返回的是累计量（手）
+            let cum_volume: f64 = parts[2].parse().unwrap_or(0.0); // 累计量：A 股为手、港股为股（见 shares_per_unit）
             let cum_turnover: f64 = parts.get(3).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0); // 累计成交额（元）
 
             // 差分：本分钟实际成交量 = 累计量 - 上分钟累计量
-            let volume = if cum_volume >= prev_vol {
+            let mut volume = if cum_volume >= prev_vol {
                 cum_volume - prev_vol
             } else {
                 cum_volume // 防御：跨天重置的情况
             };
+            // 港股累计量为「股」，对外统一换算为「手」，与实时行情及其他接口口径一致
+            if is_hk {
+                volume /= 100.0;
+            }
             let turnover = if cum_turnover >= prev_turnover {
                 cum_turnover - prev_turnover
             } else {
@@ -536,10 +548,10 @@ pub async fn fetch_intraday_data(code: &str) -> Result<IntradayData, String> {
                 0.0
             };
 
-            // 均价 = 累计成交额 / 累计成交量（股）
+            // 均价 = 累计成交额（元）/ 累计成交量（换算为股）
             // 直接用 API 返回的累计值，避免差分→再累加的精度损失和条件遗漏
             let avg_price = if cum_volume > 0.0 && cum_turnover > 0.0 {
-                (cum_turnover / (cum_volume * 100.0) * 100.0).round() / 100.0
+                (cum_turnover / (cum_volume * shares_per_unit) * 100.0).round() / 100.0
             } else if cum_volume > 0.0 && cum_vol > 0.0 {
                 // 成交额缺失时（API 只返回3个字段），用 VWAP 近似均价
                 (cum_pv / cum_vol * 100.0).round() / 100.0

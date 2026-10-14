@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import TitleBar from "./components/TitleBar.vue";
+import MarketStatusPill from "./components/MarketStatusPill.vue";
 import MarketHeader from "./components/MarketHeader.vue";
 import StockList from "./components/StockList.vue";
 import StockDetail from "./components/StockDetail.vue";
@@ -13,6 +14,7 @@ import TechAnalysisModal from "./components/TechAnalysisModal.vue";
 import AiAnalysisModal from "./components/AiAnalysisModal.vue";
 import GlobalAiModal from "./components/GlobalAiModal.vue";
 import ChipDistribution from "./components/ChipDistribution.vue";
+import BacktestModal from "./components/BacktestModal.vue";
 import PositionModal from "./components/PositionModal.vue";
 import ProfileModal from "./components/ProfileModal.vue";
 import SettingsModal from "./components/SettingsModal.vue";
@@ -77,7 +79,7 @@ const {
 } = useIndustryData();
 
 const {
-  klineData, klineLoading, klinePeriod,
+  klineData, klineLoading, klinePeriod, klineFetchedAt, klineStale,
   loadKlineData, changeKlinePeriod: rawChangePeriod,
 } = useKlineData();
 
@@ -144,6 +146,11 @@ const showChipModal = ref(false);
 function openChipModal() { showChipModal.value = true; }
 function closeChipModal() { showChipModal.value = false; }
 
+// ---- 信号回测弹窗 ----
+const showBacktestModal = ref(false);
+function openBacktestModal() { showBacktestModal.value = true; }
+function closeBacktestModal() { showBacktestModal.value = false; }
+
 // ---- 持仓弹窗 ----
 const showPositionsModal = ref(false);
 const { positions, addPosition, removePosition, updatePositionQuote, setFxRate } = usePositions();
@@ -181,7 +188,9 @@ const {
   moneyFlow, moneyFlowLoading, loadMoneyFlow,
   moneyFlowHistory, moneyFlowHistoryLoading, loadMoneyFlowHistory,
 } = useMoneyFlow(selectedStock);
-const { intradayData, intradayLoading, loadIntradayData } = useIntradayData();
+const {
+  intradayData, intradayLoading, intradayFetchedAt, intradayStale, loadIntradayData,
+} = useIntradayData();
 const { checkAndNotify, prevPrices } = useWatchlistNotifications();
 const { configs: maAlerts, checkMaAlerts, removeConfig } = useMaAlerts();
 const { alerts: priceAlerts, checkPriceAlerts } = usePriceAlerts();
@@ -341,7 +350,23 @@ let intradayTimer;
 // 自选可能混合 A 股/港股，任一市场在交易时段即视为盘中。
 let inSession = false;
 
-/** 自选/持仓是否含港股（港股休市日与 A 股不同，交易日历不覆盖，需单独判断） */
+// ── 窗口不可见时降频 ──
+// 最小化 / 隐藏到托盘后用户看不到行情，继续按原间隔请求纯属浪费带宽；
+// 不可见时把各间隔放大 HIDDEN_REFRESH_FACTOR 倍，恢复可见立即补刷一次并恢复原间隔。
+const HIDDEN_REFRESH_FACTOR = 4;
+/** document.visibilityState 判定（最小化） */
+const docHidden = ref(false);
+/** Rust 侧托盘隐藏事件判定（点关闭按钮 → window.hide()，visibilityState 不一定同步） */
+const trayHidden = ref(false);
+/** 主窗口是否不可见：两个来源任一成立即视为不可见 */
+const windowHidden = computed(() => docHidden.value || trayHidden.value);
+
+/** 定时器实际使用的间隔（不可见时放宽） */
+function effectiveInterval(ms) {
+  return windowHidden.value ? ms * HIDDEN_REFRESH_FACTOR : ms;
+}
+
+/** 自选/持仓是否含港股（港股休市日与 A 股不同，由静态假期表单独判定） */
 const hasHkStock = computed(() =>
   watchlist.value.some((s) => /^\d{5}$/.test(s.code)) ||
   positions.value.some((p) => /^\d{5}$/.test(p.code))
@@ -376,51 +401,79 @@ function rescheduleTimers() {
   clearInterval(intradayTimer);
 
   if (settings.indicesRefreshMs > 0) {
-    indicesTimer = setInterval(() => sessionTick(loadIndices), settings.indicesRefreshMs);
+    indicesTimer = setInterval(() => sessionTick(loadIndices), effectiveInterval(settings.indicesRefreshMs));
   }
   if (settings.quotesRefreshMs > 0) {
-    quotesTimer = setInterval(() => sessionTick(refreshAllQuotes), settings.quotesRefreshMs);
+    quotesTimer = setInterval(() => sessionTick(refreshAllQuotes), effectiveInterval(settings.quotesRefreshMs));
   }
   if (settings.klineRefreshMs > 0) {
     klineTimer = setInterval(() => sessionTick(() => {
       if (selectedStock.value) loadKlineData(selectedStock.value);
-    }), settings.klineRefreshMs);
+    }), effectiveInterval(settings.klineRefreshMs));
   }
   if (settings.intradayRefreshMs > 0) {
     intradayTimer = setInterval(() => sessionTick(() => {
       if (selectedStock.value) loadIntradayData(selectedStock.value);
-    }), settings.intradayRefreshMs);
+    }), effectiveInterval(settings.intradayRefreshMs));
   }
 }
 
-let unlistenMiniSelect = null;
-let unlistenIwencaiSelect = null;
-let unlistenIwencaiAdd = null;
-let unlistenIwencaiAiAnalyze = null;
+/** 可见性变化：不可见时放宽间隔、恢复可见时立即补刷一次（离开期间数据大概率已过期） */
+function onVisibilityChange() {
+  docHidden.value = document.hidden;
+}
+
+watch(windowHidden, (hidden) => {
+  if (isMiniMode || isIwencaiMode) return; // 子窗口自带独立刷新逻辑
+  rescheduleTimers();
+  // 恢复可见立即补刷一次（离开期间数据大概率已过期）；盘外数据不再变化，仍守「盘外零请求」
+  if (!hidden && isMarketSession()) handleManualRefresh();
+});
+
+let appUnmounted = false;
+/** 已登记的事件注销函数（组件卸载时统一调用） */
+const unlistenFns = [];
+
+/**
+ * 监听 Tauri 事件并登记注销函数。
+ * listen() 是异步的：若在 Promise 兑现前组件已卸载，注销函数会永久丢失并泄漏事件通道，
+ * 因此已卸载时立刻注销。
+ */
+function listenTracked(event, handler) {
+  listen(event, handler).then((fn) => {
+    if (appUnmounted) fn();
+    else unlistenFns.push(fn);
+  });
+}
 
 onMounted(() => {
   if (isMiniMode || isIwencaiMode) return; // 子窗口不执行主窗口逻辑（自带独立刷新）
 
   document.addEventListener("keydown", onKeydown);
+  // 窗口可见性（最小化）→ 降频；Rust 侧托盘隐藏事件 → 降频
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  docHidden.value = document.hidden;
+  listenTracked("main-window-hidden", () => { trayHidden.value = true; });
+  listenTracked("main-window-shown", () => { trayHidden.value = false; });
   // 全局快捷键（Ctrl+K 搜索 / Ctrl+N 全局 AI）
   setupShortcuts();
   // 迷你窗口选中股票 → 主窗口联动
-  listen("mini-select-stock", (e) => {
+  listenTracked("mini-select-stock", (e) => {
     const stock = watchlist.value.find((s) => s.code === e.payload?.code);
     if (stock) {
       selectStock(stock);
       appWindow.setFocus();
     }
-  }).then((fn) => { unlistenMiniSelect = fn; });
+  });
   // 问财选股窗口选中股票 → 主窗口联动
-  listen("iwencai-select-stock", (e) => {
+  listenTracked("iwencai-select-stock", (e) => {
     if (e.payload?.code) {
       selectIwencaiStock(e.payload);
       appWindow.setFocus();
     }
-  }).then((fn) => { unlistenIwencaiSelect = fn; });
+  });
   // 问财窗口「加入自选」→ 主窗口自选列表追加并刷新行情
-  listen("iwencai-add-watchlist", (e) => {
+  listenTracked("iwencai-add-watchlist", (e) => {
     const p = e.payload;
     if (p?.code) {
       addToWatchlist({
@@ -431,14 +484,14 @@ onMounted(() => {
       });
       refreshAllQuotes();
     }
-  }).then((fn) => { unlistenIwencaiAdd = fn; });
+  });
   // 问财窗口「AI 分析这批股票」→ 打开全局 AI 并注入选股结果解读
-  listen("iwencai-ai-analyze", (e) => {
+  listenTracked("iwencai-ai-analyze", (e) => {
     if (e.payload?.question && e.payload?.rows?.length) {
       screeningRequest.value = e.payload;
       openGlobalAiModal();
     }
-  }).then((fn) => { unlistenIwencaiAiAnalyze = fn; });
+  });
   // 拉取港元兑人民币汇率
   invoke("get_fx_rate").then((rate) => setFxRate(rate)).catch(() => {});
   // 加载用户画像
@@ -466,6 +519,10 @@ watch(
   () => { rescheduleTimers(); }
 );
 
+// 行情数据新鲜度（自选/提醒批次）：最近一次成功时间 + 最近一次是否失败
+const quoteFetchedAt = ref(0);
+const quoteStale = ref(false);
+
 async function refreshAllQuotes() {
   // 自选股 + 已配置均线提醒/价格提醒的股票（可能不在自选列表）批量刷新（A 股一次请求，大幅减少 HTTP 请求数）
   const maCodes = Object.keys(maAlerts.value);
@@ -476,6 +533,8 @@ async function refreshAllQuotes() {
   if (codes.length > 0) {
     const quotes = await loadQuotesBatch(codes);
     if (quotes) {
+      quoteFetchedAt.value = Date.now();
+      quoteStale.value = false;
       const quoteMap = new Map(quotes.map((q) => [q.code, q]));
       watchlist.value.forEach((stock) => {
         const quote = quoteMap.get(stock.code);
@@ -494,6 +553,9 @@ async function refreshAllQuotes() {
           checkPriceAlerts(quote, settings).catch(() => {});
         }
       });
+    } else {
+      // 拉取失败：保留上一份价格，仅标记为过期（前端显示「更新失败 + 重试」）
+      quoteStale.value = true;
     }
   }
   // 刷新持仓的实时行情（含港股，批量接口内部处理）
@@ -513,12 +575,12 @@ async function refreshAllQuotes() {
 
 onUnmounted(() => {
   if (isMiniMode || isIwencaiMode) return;
+  appUnmounted = true;
   document.removeEventListener("keydown", onKeydown);
+  document.removeEventListener("visibilitychange", onVisibilityChange);
   teardownShortcuts();
-  if (unlistenMiniSelect) unlistenMiniSelect();
-  if (unlistenIwencaiSelect) unlistenIwencaiSelect();
-  if (unlistenIwencaiAdd) unlistenIwencaiAdd();
-  if (unlistenIwencaiAiAnalyze) unlistenIwencaiAiAnalyze();
+  unlistenFns.forEach((fn) => fn());
+  unlistenFns.length = 0;
   clearInterval(indicesTimer);
   clearInterval(quotesTimer);
   clearInterval(klineTimer);
@@ -535,7 +597,12 @@ onUnmounted(() => {
 
   <div v-else class="app">
     <!-- 自定义标题栏 -->
-    <TitleBar @open-mini="openMiniWindow" />
+    <TitleBar @open-mini="openMiniWindow">
+      <template #status>
+        <MarketStatusPill :refreshing="refreshing" @refresh="handleManualRefresh" />
+        <MarketStatusPill v-if="hasHkStock" market="HK" :refreshing="refreshing" @refresh="handleManualRefresh" />
+      </template>
+    </TitleBar>
 
     <!-- 指数栏 -->
     <MarketHeader
@@ -580,13 +647,23 @@ onUnmounted(() => {
         :money-flow-history="moneyFlowHistory"
         :money-flow-history-loading="moneyFlowHistoryLoading"
         :watchlist-markers="watchlistMarkers"
+        :quote-fetched-at="quoteFetchedAt"
+        :quote-stale="quoteStale"
+        :kline-fetched-at="klineFetchedAt"
+        :kline-stale="klineStale"
+        :intraday-fetched-at="intradayFetchedAt"
+        :intraday-stale="intradayStale"
         @toggle-watchlist="handleToggleWatchlist"
         @change-kline-period="changeKlinePeriod"
         @open-industry-modal="onIndustryModalOpen"
         @open-tech-modal="openTechModal"
         @open-ai-modal="openAiModal"
         @open-chip-modal="openChipModal"
+        @open-backtest-modal="openBacktestModal"
         @load-intraday="loadIntradayData(selectedStock)"
+        @retry-quote="refreshAllQuotes()"
+        @retry-kline="loadKlineData(selectedStock)"
+        @retry-intraday="loadIntradayData(selectedStock)"
       />
     </div>
 
@@ -605,6 +682,7 @@ onUnmounted(() => {
     <TechAnalysisModal
       :show="showTechModal"
       :kline-data="klineData"
+      :kline-period="klinePeriod"
       :stock-name="selectedStock?.name ?? ''"
       @close="closeTechModal"
     />
@@ -614,6 +692,7 @@ onUnmounted(() => {
       :show="showAiModal"
       :selected-stock="selectedStock"
       :kline-data="klineData"
+      :kline-period="klinePeriod"
       :money-flow="moneyFlow"
       :industry-data="industryData"
       :indices="indices"
@@ -639,8 +718,17 @@ onUnmounted(() => {
     <ChipDistribution
       :show="showChipModal"
       :kline-data="klineData"
+      :kline-period="klinePeriod"
+      :stock="selectedStock"
       :loading="klineLoading"
       @close="closeChipModal"
+    />
+
+    <!-- 信号回测弹窗 -->
+    <BacktestModal
+      :show="showBacktestModal"
+      :stock="selectedStock"
+      @close="closeBacktestModal"
     />
 
     <!-- 持仓弹窗 -->

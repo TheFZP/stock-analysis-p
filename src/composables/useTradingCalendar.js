@@ -107,7 +107,11 @@ export function useTradingCalendar() {
     } catch { /* 存储不可用时仅本次会话生效 */ }
   }
 
-  /** 跨日自动刷新（轻量：每 10 分钟比较一次日期字符串） */
+  /**
+   * 跨日自动刷新（轻量：每 10 分钟比较一次日期字符串）
+   * 定时器不做清理：本 composable 是应用级单例（常驻托盘），定时器随应用生命周期存在；
+   * `if (timer)` 保证重复调用不会创建多个。
+   */
   function startRolloverWatch() {
     if (timer) return;
     timer = setInterval(() => {

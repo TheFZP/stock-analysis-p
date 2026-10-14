@@ -19,6 +19,10 @@ import { fetchDayKlineCached } from "../utils/klineCache.js";
  *      enabled, createdAt, triggeredAt }]
  * 通知历史：localStorage "stock-analysis-price-alert-history"
  *   { "2026-07-22": { [alertId]: true } }（只保留 7 天）
+ *
+ * 注意：本 composable 为**单例**。行情检查器（App.vue）与配置弹窗/详情页必须共享同一份
+ * 状态，否则弹窗里新增/修改的提醒无法被检查器看到（重启前不生效），且配置弹窗的
+ * 快照回写还会覆盖掉本会话的新增内容。
  */
 
 const STORAGE_KEY = "stock-analysis-price-alerts";
@@ -52,7 +56,12 @@ function loadHistory() {
   }
 }
 
+/** 单例实例（与配置弹窗共享，见文件头注释） */
+let _instance = null;
+
 export function usePriceAlerts() {
+  if (_instance) return _instance;
+
   /** 提醒列表 [{ id, code, name, direction, price, ... }] */
   const alerts = ref(loadAlerts());
   /** 通知历史 { date: { [alertId]: true } } */
@@ -252,7 +261,8 @@ export function usePriceAlerts() {
       }
       const sent = await sendAlertNotification(
         `${emoji} ${dirLabel}提醒: ${alert.name} (${code})`,
-        body
+        body,
+        { code, kind: "price", price, target: alert.price }
       );
       // 权限被拒时中止后续发送
       if (!sent) return;
@@ -272,7 +282,7 @@ export function usePriceAlerts() {
     }
   }
 
-  return {
+  _instance = {
     alerts,
     alertsForCode,
     countEnabledForCode,
@@ -283,4 +293,5 @@ export function usePriceAlerts() {
     pauseAlert,
     checkPriceAlerts,
   };
+  return _instance;
 }

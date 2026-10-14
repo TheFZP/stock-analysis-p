@@ -1,13 +1,13 @@
 /**
  * useIwencaiRobot — 问财自然语言选股（get-robot-data）
  *
- * 凭证与查询核心已下沉到 iwencaiClient.js（ensureV / resetV / isRateLimited / queryIwencai），
+ * 凭证与查询核心已下沉到 iwencaiClient.js（ensureV / resetV / isRateLimited / isVCredentialError / queryIwencai），
  * 本文件只保留窗口侧的响应式状态（data/loading/error）、竞态保护与结果规范化工具。
  * 共享模块同样服务于 AI 工具 stock_screener（skills/IwencaiSelect.js）。
  */
 
 import { ref } from "vue";
-import { queryIwencai, resetV, ensureV } from "./iwencaiClient.js";
+import { queryIwencai, resetV, ensureV, isVCredentialError } from "./iwencaiClient.js";
 
 /**
  * 问财自然语言选股
@@ -35,7 +35,9 @@ export function useIwencaiRobot() {
     } catch (e) {
       if (seq !== requestSeq) return;
       const msg = String(e);
-      if (msg.includes("验证凭证") || msg.includes("v")) {
+      // 仅凭证/风控类错误才提示「凭证失效」并重置缓存：
+      // 不可匹配裸 "v"（invoke 错误文案几乎总含字母 v，会误判并让 chameleon.js 反复重新注入）
+      if (isVCredentialError(msg)) {
         vError.value = true;
         // v 可能已过期：重置缓存，下次搜索重新注入 chameleon.js 生成新凭证
         resetV();

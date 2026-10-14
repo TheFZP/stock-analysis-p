@@ -5,14 +5,19 @@ import {
   calcMATrend, getCrossSignal,
 } from "../composables/useTechIndicators";
 import IndicatorCard from "./IndicatorCard.vue";
+import { periodNotice } from "../utils/klinePeriod.js";
 
 const props = defineProps({
   show: { type: Boolean, default: false },
   klineData: { type: Array, default: null },
+  klinePeriod: { type: String, default: "day" },
   stockName: { type: String, default: "" },
 });
 
 const emit = defineEmits(["close"]);
+
+// 口径提示：klineData 随图表周期切换，周/月/分钟K 下 MA5 不是 5 日均线
+const periodHint = computed(() => periodNotice(props.klinePeriod));
 
 function closeModal() {
   emit("close");
@@ -188,9 +193,10 @@ const rsiDetail = computed(() => {
         </div>
 
         <div class="modal-body">
+          <p v-if="periodHint" class="period-hint">{{ periodHint }}</p>
           <div v-if="!indicators" class="modal-loading">
             <span class="kline-icon">—</span>
-            <span>K 线数据不足，无法分析（至少需要 26 个交易日）</span>
+            <span>K 线数据不足，无法分析（至少需要 26 根 K 线）</span>
           </div>
 
           <template v-else>

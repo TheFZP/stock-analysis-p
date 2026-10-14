@@ -4,10 +4,12 @@
 //   types     - data structures (StockQuote, KlineItem, IndustryData, etc.)
 //   helpers   - utility functions (code conversion, JSON parsing)
 //   api       - API client functions (Tencent, East Money)
+//   db        - local history store (SQLite via rusqlite)
 //   commands  - Tauri command handlers
 
 mod api;
 pub mod commands;
+pub mod db;
 pub mod helpers;
 mod tray_tooltip;
 pub mod types;
@@ -15,8 +17,12 @@ pub mod types;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
+
+/// 前端 App.vue 约定：主窗口隐藏/恢复时通知前端（隐藏期间降频、恢复可见立即补刷）
+const EVENT_WINDOW_HIDDEN: &str = "main-window-hidden";
+const EVENT_WINDOW_SHOWN: &str = "main-window-shown";
 
 /// 恢复/聚焦主窗口（托盘双击、左键单击、菜单项共用）
 fn show_main_window(app: &tauri::AppHandle) {
@@ -24,6 +30,7 @@ fn show_main_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        let _ = app.emit(EVENT_WINDOW_SHOWN, ());
     }
 }
 
@@ -32,10 +39,8 @@ pub fn run() {
     tauri::Builder::default()
         // 单例：重复启动时聚焦已有窗口（主窗口优先，迷你窗口次之），并退出新实例
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
+            if app.get_webview_window("main").is_some() {
+                show_main_window(app);
             } else if let Some(window) = app.get_webview_window("mini") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -45,6 +50,15 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            // 本地历史库：初始化失败只记录日志，不阻断应用启动（落库为旁路）
+            match app.path().app_data_dir() {
+                Ok(dir) => match db::init(&dir) {
+                    Ok(path) => println!("[db] 本地历史库就绪: {}", path.display()),
+                    Err(e) => eprintln!("[db] 初始化失败，本次运行不落库: {e}"),
+                },
+                Err(e) => eprintln!("[db] 无法定位应用数据目录，本次运行不落库: {e}"),
+            }
+
             // 系统托盘：右键菜单含「显示主窗口 / 退出」，左键单击恢复主窗口
             let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -82,6 +96,8 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
+                    // 通知前端降频：WebView2 的 document.visibilityState 不保证随窗口隐藏同步
+                    let _ = window.emit(EVENT_WINDOW_HIDDEN, ());
                 }
             }
         })
@@ -109,6 +125,11 @@ pub fn run() {
             commands::get_app_version,
             commands::check_for_update,
             tray_tooltip::update_tray_tooltip,
+            commands::record_signal_events,
+            commands::record_alert_events,
+            commands::record_watchlist_change,
+            commands::get_kline_history,
+            commands::get_db_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

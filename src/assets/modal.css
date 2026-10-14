@@ -137,6 +137,18 @@
   line-height: 1.4;
 }
 
+/* ===== 周期口径提示（周K/月K/分钟K 下均线指标不是日线口径） ===== */
+.period-hint {
+  margin: 10px 20px 0;
+  padding: 7px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--fog);
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
+}
+
 /* ===== 涨跌颜色（全局复用） ===== */
 .up {
   color: var(--red);

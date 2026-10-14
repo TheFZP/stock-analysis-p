@@ -21,6 +21,7 @@ const emit = defineEmits([
   "open-chip-modal",
   "open-money-flow",
   "open-alerts",
+  "open-backtest-modal",
   "open-ai-modal",
   "toggle-watchlist",
 ]);
@@ -73,6 +74,13 @@ const emit = defineEmits([
       </svg>
       <span>提醒</span>
       <span v-if="alertCount > 0" class="ma-badge">{{ alertCount }}</span>
+    </button>
+    <button class="btn btn-backtest" @click="emit('open-backtest-modal')">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <path d="M2 13V3M2 13h12"/>
+        <path d="M4.5 10.5 7 7.5l2 1.5L13 4"/>
+      </svg>
+      <span>信号回测</span>
     </button>
     <button class="btn btn-ai" @click="emit('open-ai-modal')">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
@@ -227,9 +235,24 @@ const emit = defineEmits([
   color: var(--ink);
 }
 
-/* Steep: 提醒按钮（均线+价格合并）— 铃铛图标 + Ghost 风格，启用时橙色高亮 */
-.btn-alerts {
+/* Steep: 信号回测按钮 — 折线统计图标 + Ghost 风格，悬停转 sky 色调 */
+.btn-backtest {
   display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: all 0.15s;
+}
+.btn-backtest:hover {
+  background: var(--sky-wash);
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+/* Steep: 提醒按钮（均线+价格合并）— 铃铛图标 + Ghost 风格，启用时橙色高亮 */
+.btn-alerts {  display: flex;
   align-items: center;
   gap: 6px;
   background: transparent;

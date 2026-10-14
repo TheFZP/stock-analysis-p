@@ -14,6 +14,10 @@ import { fetchDayKlineCached, clearKlineCache } from "../utils/klineCache.js";
  *
  * 配置存储：localStorage "stock-analysis-ma-alerts"
  *   { "300750": { periods: [5, 10], direction: "both" } }
+ *
+ * 注意：本 composable 为**单例**。行情检查器（App.vue）与配置弹窗/详情页必须共享同一份
+ * 状态，否则弹窗里新增/修改的配置无法被检查器看到（重启前不生效），且启动快照回写
+ * 还会覆盖掉本会话的新增内容。
  */
 
 const STORAGE_KEY = "stock-analysis-ma-alerts";
@@ -42,7 +46,12 @@ function loadHistory() {
   }
 }
 
+/** 单例实例（与配置弹窗共享，见文件头注释） */
+let _instance = null;
+
 export function useMaAlerts() {
+  if (_instance) return _instance;
+
   /** 配置 { code: { periods: [5,10], direction: "both"|"cross_up"|"cross_down" } } */
   const configs = ref(loadConfig());
   /** 通知历史 */
@@ -180,7 +189,8 @@ export function useMaAlerts() {
       const emoji = t.dir === "up" ? "📈" : "📉";
       const sent = await sendAlertNotification(
         `${emoji} ${dirLabel} MA${t.period}: ${name} (${code})`,
-        `现价 ${price.toFixed(2)} 已${dirLabel} MA${t.period}(${t.ma.toFixed(2)})`
+        `现价 ${price.toFixed(2)} 已${dirLabel} MA${t.period}(${t.ma.toFixed(2)})`,
+        { code, kind: `ma${t.period}_${t.dir}`, price, target: t.ma }
       );
       // 权限被拒时中止后续发送
       if (!sent) return;
@@ -192,7 +202,7 @@ export function useMaAlerts() {
     }
   }
 
-  return {
+  _instance = {
     configs,
     getConfig,
     togglePeriod,
@@ -200,4 +210,5 @@ export function useMaAlerts() {
     removeConfig,
     checkMaAlerts,
   };
+  return _instance;
 }

@@ -11,7 +11,10 @@ const emit = defineEmits(["open-mini"]);
 
 <template>
   <header class="titlebar" data-tauri-drag-region>
-    <div class="titlebar-title">stock-analysis</div>
+    <div class="titlebar-left">
+      <div class="titlebar-title">stock-analysis</div>
+      <slot name="status" />
+    </div>
     <div class="titlebar-controls">
       <button class="win-btn win-mini" @click="emit('open-mini')" title="迷你盯盘小窗 (置顶)">
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
@@ -44,9 +47,18 @@ const emit = defineEmits(["open-mini"]);
   user-select: none;
 }
 
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .titlebar-title {
   font-size: 12px;
   color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .titlebar-controls {

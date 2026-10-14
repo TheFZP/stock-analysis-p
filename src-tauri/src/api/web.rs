@@ -569,6 +569,16 @@ fn extract_containers(html: &str) -> String {
     String::new()
 }
 
+/// 读取 `\u` 后的 4 位十六进制；成功返回码点，失败返回已消耗的原文（用于原样回填）
+fn read_hex4(chars: &mut std::str::Chars) -> Result<u32, String> {
+    let hex: String = chars.by_ref().take(4).collect();
+    // 不足 4 位说明转义被截断，按原文保留（否则 "12" 也会被当成合法码点）
+    if hex.len() != 4 {
+        return Err(hex);
+    }
+    u32::from_str_radix(&hex, 16).map_err(|_| hex)
+}
+
 /// 还原 JSON 字符串转义（\uXXXX、\"、\\、\n 等），用于解析内嵌转义 HTML
 fn unescape_json(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -579,14 +589,42 @@ fn unescape_json(s: &str) -> String {
             continue;
         }
         match chars.next() {
-            Some('u') => {
-                let hex: String = chars.by_ref().take(4).collect();
-                if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+            Some('u') => match read_hex4(&mut chars) {
+                // 高代理项：与紧跟其后的低代理项组合成增补平面字符（emoji 等多字节字符）
+                Ok(hi) if (0xD800..=0xDBFF).contains(&hi) => {
+                    let mut lookahead = chars.clone();
+                    let combined = if lookahead.next() == Some('\\') && lookahead.next() == Some('u') {
+                        match read_hex4(&mut lookahead) {
+                            Ok(lo) if (0xDC00..=0xDFFF).contains(&lo) => {
+                                Some(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    match combined.and_then(char::from_u32) {
+                        Some(ch) => {
+                            out.push(ch);
+                            chars = lookahead;
+                        }
+                        // 孤立代理项无法用 UTF-8 表示：用替换字符兜底，不可静默丢字
+                        None => out.push('\u{FFFD}'),
+                    }
+                }
+                Ok(lo) if (0xDC00..=0xDFFF).contains(&lo) => out.push('\u{FFFD}'),
+                Ok(cp) => {
                     if let Some(ch) = char::from_u32(cp) {
                         out.push(ch);
                     }
                 }
-            }
+                // 非法转义原样保留（含已消耗的数字）
+                Err(raw) => {
+                    out.push('\\');
+                    out.push('u');
+                    out.push_str(&raw);
+                }
+            },
             Some('n') => out.push('\n'),
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),

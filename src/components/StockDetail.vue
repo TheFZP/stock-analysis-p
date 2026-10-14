@@ -4,7 +4,10 @@ import IntradayChart from "./IntradayChart.vue";
 import MoneyFlowModal from "./MoneyFlowModal.vue";
 import AlertsModal from "./AlertsModal.vue";
 import DetailActionBar from "./DetailActionBar.vue";
+import DataFreshness from "./DataFreshness.vue";
 import { signChar } from "../utils/format";
+import { isDayPeriod } from "../utils/klinePeriod.js";
+import { recordSignalEvents } from "../utils/history.js";
 import { useT0Signals } from "../composables/useT0Signals.js";
 import { useMaAlerts } from "../composables/useMaAlerts.js";
 import { usePriceAlerts } from "../composables/usePriceAlerts.js";
@@ -23,6 +26,13 @@ const props = defineProps({
   moneyFlowHistory: { type: Array, default: null },
   moneyFlowHistoryLoading: { type: Boolean, default: false },
   watchlistMarkers: { type: Array, default: () => [] },
+  // 数据新鲜度：最近一次成功时间（ms，0=未获取）与最近一次刷新是否失败（展示旧数据）
+  quoteFetchedAt: { type: Number, default: 0 },
+  quoteStale: { type: Boolean, default: false },
+  klineFetchedAt: { type: Number, default: 0 },
+  klineStale: { type: Boolean, default: false },
+  intradayFetchedAt: { type: Number, default: 0 },
+  intradayStale: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -32,7 +42,11 @@ const emit = defineEmits([
   "open-tech-modal",
   "open-ai-modal",
   "open-chip-modal",
+  "open-backtest-modal",
   "load-intraday",
+  "retry-quote",
+  "retry-kline",
+  "retry-intraday",
 ]);
 
 const chartMode = ref("intraday"); // "kline" | "intraday"
@@ -75,15 +89,23 @@ const currencySymbol = computed(() => isHK.value ? "HK$" : "¥");
 /** T+0 信号系统 */
 const { signalMarkers, summary: t0Summary, compute: computeT0Signals } = useT0Signals();
 
-// 当分时数据或K线数据变化时重新计算信号
+// 当分时数据、K线数据或图表周期变化时重新计算信号
+// 注意：compute 是异步的（非日K周期需取日K缓存做趋势/背离），必须 await 后再落库，
+// 否则 t0Summary 还是 null，信号事件会被静默丢掉
 watch(
-  [() => props.klineData, () => props.intradayData, () => props.selectedStock],
-  ([kline, intraday, stock]) => {
+  [() => props.klineData, () => props.intradayData, () => props.selectedStock, () => props.klinePeriod],
+  async ([kline, intraday, stock, period]) => {
     if (intraday && intraday.items && intraday.items.length > 0) {
       // 信号分析为尽力而为的辅助功能：内部异常不得打断组件更新队列
       // （历史教训：一次未捕获异常会级联打崩整个渲染周期）
       try {
-        computeT0Signals(kline, intraday, stock);
+        await computeT0Signals(kline, intraday, stock, period);
+        // 只落"事件型"信号（日内量价陷阱 / 放量异动）：带时间锚点，后端按
+        // (code, 日期, 类型, 名称, 时间) 去重，重复计算不会产生重复行
+        if (stock?.code) {
+          recordSignalEvents(stock.code, "trap", t0Summary.value?.signals);
+          recordSignalEvents(stock.code, "volume", t0Summary.value?.raw?.volumeSignals);
+        }
       } catch (e) {
         console.error("计算 T+0/量价陷阱信号失败:", e);
       }
@@ -125,6 +147,8 @@ const sinceAddedPct = computed(() => {
     return ((currentPrice - stock.addedPrice) / stock.addedPrice) * 100;
   }
   // 回退：从 K 线中找加入自选当日的收盘价
+  // 只有日K的 date 才等于「某交易日」，周/月/分钟K 的 date 撞上 addedAt 会取到错误收盘价
+  if (!isDayPeriod(props.klinePeriod)) return null;
   if (!klines || !Array.isArray(klines) || klines.length === 0) return null;
   const addedKline = klines.find((k) => k.date === stock.addedAt);
   if (!addedKline?.close || addedKline.close === 0) return null;
@@ -156,7 +180,7 @@ const sinceAddedPct = computed(() => {
       </div>
 
       <div class="price-area">
-        <div class="price-main">
+        <div class="price-main" :class="{ 'is-stale': quoteStale }">
           <span class="price" :class="selectedStock.change >= 0 ? 'up' : 'down'">
             {{ currencySymbol }}{{ selectedStock.price.toFixed(2) }}
           </span>
@@ -166,6 +190,13 @@ const sinceAddedPct = computed(() => {
           <span class="price-pct" :class="selectedStock.change >= 0 ? 'up' : 'down'">
             {{ signChar(selectedStock.changePct) }}{{ selectedStock.changePct.toFixed(2) }}%
           </span>
+          <DataFreshness
+            class="price-fresh"
+            :at="quoteFetchedAt"
+            :stale="quoteStale"
+            label="行情"
+            @retry="emit('retry-quote')"
+          />
         </div>
       </div>
 
@@ -193,7 +224,10 @@ const sinceAddedPct = computed(() => {
           :markers="watchlistMarkers"
           :show-sr="showSR"
           :code="selectedStock?.code ?? ''"
+          :fetched-at="klineFetchedAt"
+          :stale="klineStale"
           @change-period="emit('change-kline-period', $event)"
+          @retry="emit('retry-kline')"
         />
       </div>
 
@@ -204,6 +238,9 @@ const sinceAddedPct = computed(() => {
           :loading="intradayLoading"
           :signal-markers="signalMarkers"
           :code="selectedStock?.code ?? ''"
+          :fetched-at="intradayFetchedAt"
+          :stale="intradayStale"
+          @retry="emit('retry-intraday')"
         />
       </div>
 
@@ -242,6 +279,7 @@ const sinceAddedPct = computed(() => {
         @open-chip-modal="emit('open-chip-modal')"
         @open-money-flow="showMoneyFlowModal = true"
         @open-alerts="showAlertsModal = true"
+        @open-backtest-modal="emit('open-backtest-modal')"
         @open-ai-modal="emit('open-ai-modal')"
         @toggle-watchlist="emit('toggle-watchlist', $event)"
       />
@@ -416,6 +454,16 @@ const sinceAddedPct = computed(() => {
   align-items: baseline;
   gap: 14px;
   flex-wrap: wrap;
+}
+
+/* 刷新失败：展示的是旧价格，整行转灰（角标处给出「更新失败 + 重试」） */
+.price-main.is-stale {
+  opacity: 0.55;
+}
+
+/* 角标按基线对齐会偏低，改为垂直居中 */
+.price-fresh {
+  align-self: center;
 }
 
 .price {

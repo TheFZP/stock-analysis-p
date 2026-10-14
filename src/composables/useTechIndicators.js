@@ -112,15 +112,22 @@ export function calcRSI(closePrices, period = 14) {
   return rsi;
 }
 
-/** 判断交叉信号: 从 arr 最后 lookback 个元素中检测 key1 上穿 key2 或 key1 下穿 key2 */
+/**
+ * 判断交叉信号：在 arr 末尾 lookback 根内，查找 key1 上穿 / 下穿 key2 的最近一次交叉
+ * @returns {string|null} 如「金叉 ↑」（最后一根发生）、「金叉 ↑（2 根前）」，无交叉返回 null
+ */
 export function getCrossSignal(arr, key1, key2, lookback = 3) {
   if (arr.length < lookback + 1) return null;
-  const prev = arr[arr.length - lookback];
-  const curr = arr[arr.length - 1];
-  if (!prev || !curr) return null;
-  const prevDiff = prev[key1] - prev[key2];
-  const currDiff = curr[key1] - curr[key2];
-  if (prevDiff <= 0 && currDiff > 0) return "金叉 ↑";
-  if (prevDiff >= 0 && currDiff < 0) return "死叉 ↓";
+  for (let back = 1; back <= lookback; back++) {
+    const prev = arr[arr.length - back - 1];
+    const curr = arr[arr.length - back];
+    if (!prev || !curr) continue;
+    const prevDiff = prev[key1] - prev[key2];
+    const currDiff = curr[key1] - curr[key2];
+    // 带偏移量，避免把数根之前发生的交叉当成当前信号（AI 会照抄「信号：金叉」）
+    const suffix = back === 1 ? "" : `（${back} 根前）`;
+    if (prevDiff <= 0 && currDiff > 0) return `金叉 ↑${suffix}`;
+    if (prevDiff >= 0 && currDiff < 0) return `死叉 ↓${suffix}`;
+  }
   return null;
 }

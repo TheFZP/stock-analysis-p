@@ -5,13 +5,14 @@ import AiApiKeySetup from "./ai/AiApiKeySetup.vue";
 import AiChatMessages from "./ai/AiChatMessages.vue";
 import AiChatFooter from "./ai/AiChatFooter.vue";
 import AiModelControls from "./ai/AiModelControls.vue";
-import { calcChipDistribution } from "../composables/useChipDistribution";
+import { calcChipDistribution, chipOptionsFromQuote } from "../composables/useChipDistribution";
 import { calcMACD, calcKDJ, calcRSI, calcWR, calcMATrend, getCrossSignal } from "../composables/useTechIndicators";
 
 const props = defineProps({
   show: { type: Boolean, default: false },
   selectedStock: { type: Object, default: null },
   klineData: { type: Array, default: null },
+  klinePeriod: { type: String, default: "day" },
   moneyFlow: { type: Object, default: null },
   industryData: { type: Object, default: null },
   indices: { type: Array, default: null },
@@ -77,9 +78,14 @@ async function handleSend() {
   inputText.value = "";
 
   try {
-    const chipData = calcChipDistribution(props.klineData || []);
+    const chipData = calcChipDistribution(
+      props.klineData || [],
+      chipOptionsFromQuote(props.selectedStock, props.klinePeriod)
+    );
     const contextData = {
       klineData: props.klineData,
+      // 周期口径随数据一起传：klineData 是共享且可切换周期的序列（见 utils/klinePeriod.js）
+      klinePeriod: props.klinePeriod,
       moneyFlow: props.moneyFlow,
       industryData: props.industryData,
       indices: props.indices,

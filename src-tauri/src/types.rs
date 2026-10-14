@@ -157,3 +157,57 @@ pub struct HotListData {
     pub stock_list: Vec<HotStockItem>,
 }
 
+/// 写入本地历史库的信号事件（前端 signals 计算完成后回传）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalEventInput {
+    pub code: String,
+    #[serde(default)]
+    pub kind: String,   // trap / volume / ma / t0 等来源分类
+    #[serde(default)]
+    pub name: String,   // 信号名称（含 emoji 前缀，原样保留）
+    #[serde(default)]
+    pub time: String,   // 时间锚点，日 K 类信号可为空
+    #[serde(default)]
+    pub dir: String,    // bull / bear
+    #[serde(default)]
+    pub detail: String, // 说明文本
+    #[serde(default)]
+    pub price: f64,
+}
+
+/// 写入本地历史库的提醒事件（通知成功发送后回传）
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AlertEventInput {
+    pub code: String,
+    #[serde(default)]
+    pub kind: String, // watchlist / ma / price
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub price: f64,
+    #[serde(default)]
+    pub target: f64, // 触发目标价（无则 0）
+}
+
+/// 本地历史库概况
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DbStats {
+    pub path: String,
+    pub size_bytes: u64,
+    pub quote_rows: i64,
+    pub quote_codes: i64,
+    pub quote_first_date: String,
+    pub quote_last_date: String,
+    pub kline_rows: i64,
+    pub kline_codes: i64,
+    pub kline_first_date: String,
+    pub kline_last_date: String,
+    pub money_rows: i64,
+    pub signal_rows: i64,
+    pub alert_rows: i64,
+    pub watchlist_rows: i64,
+}
+

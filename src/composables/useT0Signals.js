@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { getLimitPct } from '../utils/limit.js'
+import { fetchDayKlineCached } from '../utils/klineCache.js'
 import { calcTrapSignals } from './useTrapSignals.js'
 import { calcVolumeSignals } from './useVolumeSignals.js'
 
@@ -7,9 +8,12 @@ import { calcVolumeSignals } from './useVolumeSignals.js'
  * useT0Signals — 日内 T+0 交易信号系统（基于分时数据 + 日K趋势）
  *
  * 输入：
- *   - klineData: 日K数据（用于判断日线趋势、MA5、MACD背离等）
+ *   - klineData: 当前图表周期的 K 线（period === 'day' 时即日K数据）
  *   - intradayData: 分时数据 { items: [{ time, price, avgPrice, volume, turnover, vwap }, ...], preClose, date }
  *   - stock: { code } 用于按板块判断涨跌停幅度（创业板/科创板 ±20%、北交所 ±30%、港股无限制，ST 与所属板块一致）
+ *   - period: 图表周期（m5/m15/m30/m60/day/week/month，见 utils/klinePeriod.js）。
+ *     趋势 / MACD 背离只吃日K：非日K时改用日K缓存（fetchDayKlineCached），
+ *     取不到就跳过这两项判断，绝不拿周线均线冒充「日线 MA5」。
  *
  * 输出：
  *   - signalMarkers: 分时图标记数组
@@ -95,16 +99,34 @@ export function useT0Signals() {
   const signalMarkers = ref([])
   const summary = ref(null)
 
+  /** 异步重算代际守卫：周期切换/刷新触发重算时，旧结果一律丢弃 */
+  let seq = 0
+
   /**
-   * @param {Array} klineData - 日K 数组
+   * @param {Array} klineData - 当前图表周期的 K 线数组
    * @param {Object} intradayData - 分时数据对象
    * @param {Object} [stock] - 股票信息 { code, name }，用于按板块判断涨跌停幅度
+   * @param {string} [period] - 图表周期，默认 day
    */
-  function compute(klineData, intradayData, stock) {
+  async function compute(klineData, intradayData, stock, period = 'day') {
+    const mySeq = ++seq
     signalMarkers.value = []
     summary.value = null
 
     if (!intradayData?.items || intradayData.items.length === 0) return
+
+    // 趋势 / MACD 背离只认日K：图表切到周/月/分钟K 时，改用日K缓存的数据
+    let dayKline = period === 'day' ? klineData : null
+    let dayKMissing = false
+    if (period !== 'day') {
+      dayKline = stock?.code ? await fetchDayKlineCached(stock.code) : null
+      if (mySeq !== seq) return // 已被更新的调用取代
+    }
+    // 日K不足 10 根（次新股/新股/缓存失败）时，不拿不足样本的 MA5 冒充趋势
+    if (!Array.isArray(dayKline) || dayKline.length < 10) {
+      dayKMissing = true
+      dayKline = null
+    }
 
     const items = intradayData.items
     const preClose = intradayData.preClose || 0
@@ -115,12 +137,12 @@ export function useT0Signals() {
     // "接近"判定线：涨停幅度的 70%（约等于原 7% 对 10% 的比例）
     const nearLimitPct = limitPct > 0 ? limitPct * 0.7 : 0
 
-    // ======== 日K趋势 ========
+    // ======== 日K趋势（只吃日K，见函数注释） ========
     let trendDir = 'sideways'
     let ma5 = null, ma10 = null
 
-    if (klineData && klineData.length >= 10) {
-      const closes = klineData.map(k => k.close)
+    if (dayKline && dayKline.length >= 10) {
+      const closes = dayKline.map(k => k.close)
       const ma5Arr = sma(closes, 5)
       const ma10Arr = sma(closes, 10)
       ma5 = ma5Arr[ma5Arr.length - 1]
@@ -173,12 +195,12 @@ export function useT0Signals() {
     // ======== MACD 背离（基于日K） ========
     let macdState = null, topDivergence = false, bottomDivergence = false
 
-    if (klineData && klineData.length >= 35) {
-      const kCloses = klineData.map(k => k.close)
-      const kHighs = klineData.map(k => k.high)
-      const kLows = klineData.map(k => k.low)
+    if (dayKline && dayKline.length >= 35) {
+      const kCloses = dayKline.map(k => k.close)
+      const kHighs = dayKline.map(k => k.high)
+      const kLows = dayKline.map(k => k.low)
       const macdArr = calcMACD(kCloses)
-      const K = klineData.length
+      const K = dayKline.length
 
       if (macdArr.length >= 30) {
         const lb = Math.min(20, K - 1)
@@ -373,6 +395,9 @@ export function useT0Signals() {
     } else if (nearLimitPct > 0 && changePct < -nearLimitPct) {
       direction = '正T为主'
       directionReason.push(`日内大跌 ${changePct.toFixed(1)}%，接近跌停板（${limitPct.toFixed(0)}%）→ 不宜杀跌，偏正T低吸`)
+    } else if (dayKMissing) {
+      direction = '观望'
+      directionReason.push('日K数据不足或获取失败，已跳过日线趋势与 MACD 背离判断（分时信号不受影响）')
     } else if (trendDir === 'up') {
       direction = '正T为主'
       directionReason.push('日线 MA5 向上，上升趋势')
@@ -406,7 +431,8 @@ export function useT0Signals() {
 
     // ======== 风险提示 ========
     const risks = []
-    if (trendDir === 'sideways') risks.push('横盘震荡，差价空间缩小，假突破概率高')
+    if (trendDir === 'sideways' && !dayKMissing) risks.push('横盘震荡，差价空间缩小，假突破概率高')
+    if (dayKMissing) risks.push('日K数据不足或不可用，日线趋势与 MACD 背离信号已跳过')
     if (topDivergence && direction === '正T为主') risks.push('顶背离+上升趋势，追高需谨慎')
     if (bottomDivergence && direction === '反T为主') risks.push('底背离+下降趋势，杀跌需谨慎')
     if (intraVolRatio > 2) risks.push('分时放量明显，警惕主力对倒出货')
@@ -465,7 +491,7 @@ export function useT0Signals() {
         highTime: items[highIdx]?.time, lowTime: items[lowIdx]?.time,
         distFromAvg: distFromAvg.toFixed(2),
         volRatio: intraVolRatio.toFixed(2),
-        trend: trendDir === 'up' ? '上升' : trendDir === 'down' ? '下降' : '横盘',
+        trend: dayKMissing ? '未知' : trendDir === 'up' ? '上升' : trendDir === 'down' ? '下降' : '横盘',
         changePct: changePct.toFixed(2),
         ma5, ma10, macdState, dataPoints: N,
         trapCount: trapRes.traps.length,

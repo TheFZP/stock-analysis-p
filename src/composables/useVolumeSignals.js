@@ -61,7 +61,6 @@ export function calcVolumeSignals(intradayData) {
   const N = items.length;
   const prices = items.map((i) => i.price);
   const volumes = items.map((i) => i.volume);
-  const avgPrices = items.map((i) => (i.vwap > 0 ? i.vwap : i.avgPrice > 0 ? i.avgPrice : i.price));
 
   // 无量能数据时无法做量价判断
   if (mean(volumes) <= 0) return { signals, markers: [] };

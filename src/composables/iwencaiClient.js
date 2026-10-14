@@ -84,6 +84,12 @@ function isRateLimited(msg) {
   );
 }
 
+/** 判断错误是否与凭证 v 有关（凭证获取失败 / 风控限流，需重置 v 后重试）。
+ *  供窗口侧判断是否提示「凭证失效」并清空凭证缓存，绝不可匹配裸 "v"。 */
+export function isVCredentialError(msg) {
+  return isRateLimited(msg) || msg.includes("验证凭证");
+}
+
 /** 归一化查询语句（去空白、小写），用于缓存键 */
 function normalizeQuestion(q) {
   return String(q || "").replace(/\s+/g, "").toLowerCase();
@@ -98,7 +104,10 @@ function normalizeQuestion(q) {
  * @throws 非限流错误原样抛出；两次尝试均限流时抛出最后一次错误
  */
 export async function queryIwencai(question, page = 1, perpage = 50) {
-  const key = normalizeQuestion(question);
+  // 缓存键必须包含 perpage：问财服务端忽略 page（翻页在本地进行），但 perpage 会改变
+  // 返回行数（窗口 50 行 / AI 工具 100 行）。若只按 question 做键，先发起的 perpage=50
+  // 会把结果写入缓存，导致 AI 只拿到 50 行却以为已获得完整列表。
+  const key = `${normalizeQuestion(question)}|${perpage}`;
 
   // 会话缓存命中（含 AI 重复调用场景，避免触发限流）
   const cached = queryCache.get(key);

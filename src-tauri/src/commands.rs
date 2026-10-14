@@ -5,9 +5,10 @@ use crate::api::{
     fetch_stock_quote, fetch_stock_quotes_batch, fetch_trading_days, parse_industry_analysis,
 };
 use crate::types::{
-    HotListData, IndustryData, IntradayData, KlineItem, MarketIndex, MoneyFlow,
-    MoneyFlowHistoryItem, SearchResult, StockQuote, UpdateInfo,
+    AlertEventInput, DbStats, HotListData, IndustryData, IntradayData, KlineItem, MarketIndex,
+    MoneyFlow, MoneyFlowHistoryItem, SearchResult, SignalEventInput, StockQuote, UpdateInfo,
 };
+use crate::db;
 use std::fs;
 use tauri::Manager;
 
@@ -43,7 +44,9 @@ pub async fn get_stock_industry(code: String) -> Result<IndustryData, String> {
 /// 获取个股 K 线数据（日/周/月）
 #[tauri::command]
 pub async fn get_stock_kline(code: String, period: String) -> Result<Vec<KlineItem>, String> {
-    fetch_kline_data(&code, &period).await
+    let items = fetch_kline_data(&code, &period).await?;
+    db::record_kline(&code, &period, &items);
+    Ok(items)
 }
 
 /// 获取个股分时数据
@@ -55,7 +58,9 @@ pub async fn get_stock_intraday(code: String) -> Result<IntradayData, String> {
 /// 获取个股实时行情
 #[tauri::command]
 pub async fn get_stock_quote(code: String) -> Result<StockQuote, String> {
-    fetch_stock_quote(&code).await
+    let quote = fetch_stock_quote(&code).await?;
+    db::record_quotes(std::slice::from_ref(&quote));
+    Ok(quote)
 }
 
 
@@ -174,7 +179,9 @@ pub async fn get_market_indices() -> Result<Vec<MarketIndex>, String> {
 /// 批量获取多只股票实时行情（腾讯批量接口，A 股一次请求，港股逐只）
 #[tauri::command]
 pub async fn get_stock_quotes_batch(codes: Vec<String>) -> Result<Vec<StockQuote>, String> {
-    fetch_stock_quotes_batch(&codes).await
+    let quotes = fetch_stock_quotes_batch(&codes).await?;
+    db::record_quotes(&quotes);
+    Ok(quotes)
 }
 
 /// 搜索股票
@@ -189,11 +196,16 @@ pub async fn search_stocks(keyword: String) -> Result<Vec<SearchResult>, String>
 pub async fn get_stock_money_flow(code: String) -> Result<MoneyFlow, String> {
     // 先尝试腾讯 API
     match fetch_money_flow(&code).await {
-        Ok(flow) => return Ok(flow),
+        Ok(flow) => {
+            db::record_money_flow(&code, &flow);
+            return Ok(flow);
+        }
         Err(e) => {
             // 如果腾讯返回 NO_DATA，尝试东方财富
             if e == "NO_DATA" {
-                return fetch_money_flow_eastmoney(&code).await;
+                let flow = fetch_money_flow_eastmoney(&code).await?;
+                db::record_money_flow(&code, &flow);
+                return Ok(flow);
             }
             return Err(e);
         }
@@ -206,7 +218,9 @@ pub async fn get_stock_money_flow_history(
     code: String,
     limit: Option<u32>,
 ) -> Result<Vec<MoneyFlowHistoryItem>, String> {
-    fetch_money_flow_history(&code, limit.unwrap_or(30)).await
+    let items = fetch_money_flow_history(&code, limit.unwrap_or(30)).await?;
+    db::record_money_flow_history(&code, &items);
+    Ok(items)
 }
 
 /// 获取热榜数据
@@ -348,5 +362,47 @@ pub async fn get_iwencai_robot(
         token.as_deref().unwrap_or(IWENCAI_DEFAULT_TOKEN),
     )
     .await
+}
+
+// ──────────────────────────────────────────
+// 本地历史库（SQLite）
+// ──────────────────────────────────────────
+
+/// 落信号事件（前端信号计算完成后回传；同 code/日期/类型/名称/时间锚点 自动去重）
+#[tauri::command]
+pub async fn record_signal_events(events: Vec<SignalEventInput>) -> Result<usize, String> {
+    db::record_signal_events(&events)
+}
+
+/// 落提醒事件（通知成功发送后回传，不去重：同一提醒多次触发是有效信息）
+#[tauri::command]
+pub async fn record_alert_events(events: Vec<AlertEventInput>) -> Result<usize, String> {
+    db::record_alert_events(&events)
+}
+
+/// 落自选变更（action: add / remove）
+#[tauri::command]
+pub async fn record_watchlist_change(
+    action: String,
+    code: String,
+    name: String,
+) -> Result<(), String> {
+    db::record_watchlist_change(&action, &code, &name)
+}
+
+/// 读取本地历史 K 线（由 get_stock_kline 落库；本地不足时返回已有部分，由前端决定是否补拉）
+#[tauri::command]
+pub async fn get_kline_history(
+    code: String,
+    period: String,
+    limit: Option<u32>,
+) -> Result<Vec<KlineItem>, String> {
+    db::query_kline(&code, &period, limit.unwrap_or(500))
+}
+
+/// 本地历史库概况（行数 / 日期范围 / 文件大小）
+#[tauri::command]
+pub async fn get_db_stats() -> Result<DbStats, String> {
+    db::stats()
 }
 

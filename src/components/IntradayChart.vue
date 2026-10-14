@@ -3,6 +3,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { createChart, ColorType, LineSeries, HistogramSeries, AreaSeries, createSeriesMarkers } from "lightweight-charts";
 import { getLimitPct } from "../utils/limit";
 import { usePositions } from "../composables/usePositions.js";
+import DataFreshness from "./DataFreshness.vue";
 
 const { positions } = usePositions();
 
@@ -11,7 +12,13 @@ const props = defineProps({
   loading: { type: Boolean, default: false },
   signalMarkers: { type: Array, default: () => [] },
   code: { type: String, default: "" }, // 股票代码，用于按板块计算涨跌停参考线
+  /** 最近一次成功获取分时数据的时间戳（ms）；0 = 未获取过 */
+  fetchedAt: { type: Number, default: 0 },
+  /** 最近一次刷新失败：当前展示的是旧数据 */
+  stale: { type: Boolean, default: false },
 });
+
+const emit = defineEmits(["retry"]);
 
 const chartContainer = ref(null);
 
@@ -513,7 +520,10 @@ onUnmounted(() => {
 <template>
   <div class="intraday-wrapper">
     <div class="intraday-header">
-      <span class="intraday-title">分时图</span>
+      <div class="intraday-header-left">
+        <span class="intraday-title">分时图</span>
+        <DataFreshness :at="fetchedAt" :stale="stale" label="分时" @retry="emit('retry')" />
+      </div>
       <div class="intraday-legend">
         <span class="legend-item price-legend">
           <span class="legend-dot" style="background: #e74c3c"></span>
@@ -562,7 +572,7 @@ onUnmounted(() => {
         </template>
       </div>
     </div>
-    <div class="intraday-chart-wrap">
+    <div class="intraday-chart-wrap" :class="{ 'is-stale': stale }">
       <div ref="chartContainer" class="intraday-chart"></div>
       <div v-if="loading" class="intraday-loading">
         <span class="intraday-loading-icon">⟳</span>
@@ -591,6 +601,13 @@ onUnmounted(() => {
   padding: 0 0 8px 0;
   flex-wrap: wrap;
   gap: 8px 12px;
+}
+
+.intraday-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .intraday-title {
@@ -650,6 +667,12 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   position: relative;
+}
+
+/* 刷新失败：当前画的是旧数据，整块图表转灰提示 */
+.intraday-chart-wrap.is-stale {
+  filter: grayscale(0.85);
+  opacity: 0.7;
 }
 
 .intraday-chart {

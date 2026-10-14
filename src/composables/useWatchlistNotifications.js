@@ -168,7 +168,8 @@ export function useWatchlistNotifications() {
 
       const sent = await sendAlertNotification(
         `${label}: ${name} (${code})`,
-        `当前价 ${price.toFixed(2)}  涨跌幅 ${sign}${changePct.toFixed(2)}%`
+        `当前价 ${price.toFixed(2)}  涨跌幅 ${sign}${changePct.toFixed(2)}%`,
+        { code, kind: `watchlist_${trigger}`, price }
       );
       // 权限被拒时中止后续发送（避免每条都请求权限）
       if (!sent) return;

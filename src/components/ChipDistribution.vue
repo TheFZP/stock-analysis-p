@@ -7,11 +7,18 @@
  * 筹码峰（最高集中度）使用强调色高亮。
  */
 import { computed, ref, watch, nextTick } from "vue";
-import { calcChipDistribution } from "../composables/useChipDistribution";
+import {
+  calcChipDistribution,
+  chipOptionsFromQuote,
+  CHIP_MAX_BARS,
+} from "../composables/useChipDistribution";
+import { getPeriodMeta } from "../utils/klinePeriod.js";
 
 const props = defineProps({
   show: { type: Boolean, default: false },
   klineData: { type: Array, default: null },
+  klinePeriod: { type: String, default: "day" },
+  stock: { type: Object, default: null },
   loading: { type: Boolean, default: false },
 });
 
@@ -24,17 +31,31 @@ function closeModal() {
 /** 内部缓存的计算结果 */
 const chipResult = ref(null);
 
+/** 衰减选项：仅日K + 有换手率时启用（见 useChipDistribution.chipOptionsFromQuote） */
+const chipOptions = computed(() => chipOptionsFromQuote(props.stock, props.klinePeriod));
+
+/** 统计口径提示：窗口根数按实际周期标注（480 根日K ≈ 2 年，周K/分钟K 含义不同） */
+const periodHint = computed(() => {
+  const label = getPeriodMeta(props.klinePeriod).label;
+  const bars = Math.min(CHIP_MAX_BARS, props.klineData?.length || 0);
+  const base = `统计口径：最近 ${bars} 根 K 线（${label}）的价格成交分布`;
+  const tr = chipResult.value?.decayTurnoverRate;
+  return chipResult.value?.decayed
+    ? `${base} + 换手率衰减（衰减系数 1${tr != null ? `，按最新换手率 ${tr}% 折算历史筹码留存` : ""}）`
+    : `${base}（未做换手率衰减：仅日K且取到换手率时启用）`;
+});
+
 /** 自动计算筹码分布 */
 function compute() {
   if (!props.klineData || props.klineData.length < 5) {
     chipResult.value = null;
     return;
   }
-  chipResult.value = calcChipDistribution(props.klineData);
+  chipResult.value = calcChipDistribution(props.klineData, chipOptions.value);
 }
 
 watch(
-  () => props.klineData,
+  () => [props.klineData, chipOptions.value],
   () => {
     if (props.show) {
       nextTick(compute);
@@ -169,6 +190,7 @@ function formatPrice(v) {
 
         <!-- 内容区 -->
         <div class="modal-body">
+          <p v-if="chipResult" class="period-hint">{{ periodHint }}</p>
           <!-- 加载状态 -->
           <div v-if="loading" class="state-msg">
             <span>计算中...</span>
@@ -177,7 +199,7 @@ function formatPrice(v) {
           <!-- 空状态 -->
           <div v-else-if="!chipResult" class="state-msg">
             <p class="state-title">数据不足</p>
-            <p class="state-hint">无法计算筹码分布，请选择日/周/月 K 线数据完备的股票</p>
+            <p class="state-hint">当前周期 K 线不足 5 根，无法计算筹码分布</p>
           </div>
 
           <!-- 条形图 -->

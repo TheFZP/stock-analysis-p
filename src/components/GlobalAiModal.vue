@@ -204,9 +204,10 @@ function parseAtCode(text) {
   return m ? m[1] : null;
 }
 
-/** 代码 → 市场推断（5 位=港股，6 开头=沪市，其余=深市） */
+/** 代码 → 市场推断（5 位=港股，43/82/83/87/88/92 开头=北交所，6 开头=沪市，其余=深市） */
 function inferMarket(code) {
   if (/^\d{5}$/.test(code)) return "HK";
+  if (/^(43|82|83|87|88|92)/.test(code)) return "BJ";
   return code.startsWith("6") ? "SH" : "SZ";
 }
 

@@ -64,6 +64,7 @@ export function useStockSearch(getWatchlist) {
   }
 
   function onSearchBlur() {
+    if (blurTimer) { clearTimeout(blurTimer); }
     blurTimer = setTimeout(() => { showResults.value = false; }, 200);
   }
 
